@@ -1,0 +1,1288 @@
+openapi: 3.1.0
+info:
+  title: SCDP API
+  description: >-
+    Système de Classification Diagnostique Probabiliste — Brevet FR2603250 (INPI, dossier en cours).
+    
+    Pipeline algorithmique 7 étapes (a→g) pour la classification diagnostique probabiliste de
+    pathologies chroniques complexes : fibromyalgie, endométriose, SDRC, SFC/ME, Covid Long Neurologique.
+    
+    **Confidential — NDA en vigueur — YSDA / FORMIDOC**
+  version: 1.0.0
+  contact:
+    name: YSDA / FORMIDOC
+  license:
+    name: Propriétaire — Brevet FR2603250
+servers:
+  - url: /
+    description: Serveur courant
+
+tags:
+  - name: Auth
+    description: Inscription, connexion, gestion des tokens JWT
+  - name: SCDP
+    description: Moteur de classification diagnostique probabiliste
+  - name: Reports
+    description: Consultation et téléchargement des rapports
+  - name: Admin
+    description: Administration (accès restreint rôle admin)
+  - name: Système
+    description: Healthcheck et métriques Prometheus
+
+# ─────────────────────────────────────────────
+# Composants réutilisables
+# ─────────────────────────────────────────────
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        Token JWT obtenu via POST /api/v1/auth/login.
+        Format : `Authorization: Bearer <access_token>`
+
+  schemas:
+
+    # ── Auth ──────────────────────────────────
+
+    RegisterRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: medecin@exemple.fr
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+          description: >-
+            Doit contenir au moins une majuscule et un chiffre.
+          example: "TestPass1"
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: medecin@exemple.fr
+        password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          example: "TestPass1"
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+
+    LogoutRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+
+    TokenResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: JWT access token (durée configurée par ACCESS_TOKEN_EXPIRE_MINUTES)
+        refresh_token:
+          type: string
+          description: JWT refresh token (durée configurée par REFRESH_TOKEN_EXPIRE_DAYS)
+        token_type:
+          type: string
+          example: bearer
+        expires_in:
+          type: integer
+          description: Durée de vie du access token en secondes
+          example: 1800
+
+    UserResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum: [medecin, admin]
+        created_at:
+          type: string
+          format: date-time
+
+    # ── SCDP — Entrée ─────────────────────────
+
+    ClinicalDataCommon:
+      type: object
+      required:
+        - WPI
+        - fatigue_score
+        - sleep_score
+        - cognitive_score
+        - psych_score
+        - evolution_months
+        - exclusion_flags
+      properties:
+        WPI:
+          type: integer
+          minimum: 0
+          maximum: 19
+          description: Widespread Pain Index (ACR 2016)
+          example: 10
+        fatigue_score:
+          type: integer
+          minimum: 0
+          maximum: 3
+          description: Score de fatigue (0 = absent, 3 = sévère)
+          example: 2
+        sleep_score:
+          type: integer
+          minimum: 0
+          maximum: 3
+          description: Score de trouble du sommeil
+          example: 2
+        cognitive_score:
+          type: integer
+          minimum: 0
+          maximum: 3
+          description: Score de trouble cognitif
+          example: 1
+        psych_score:
+          type: integer
+          minimum: 0
+          maximum: 3
+          description: Score de comorbidité psychiatrique
+          example: 1
+        evolution_months:
+          type: integer
+          minimum: 0
+          description: Durée d'évolution des symptômes en mois
+          example: 6
+        exclusion_flags:
+          type: array
+          items:
+            type: boolean
+          description: >-
+            Flags d'exclusion — biomarqueurs organiques positifs.
+            True = flag positif (présence d'une pathologie organique explicative).
+          example: [false, false, false]
+
+    EvaluateRequest:
+      type: object
+      required: [pathology_id, clinical_data]
+      properties:
+        pathology_id:
+          type: string
+          enum:
+            - fibromyalgie
+            - endometriose
+            - sdrc
+            - sfc_me
+            - covid_long_neurologique
+          description: Identifiant de la pathologie à évaluer
+          example: fibromyalgie
+        clinical_data:
+          allOf:
+            - $ref: '#/components/schemas/ClinicalDataCommon'
+          description: >-
+            Données cliniques communes + champs pathologie-spécifiques.
+            Champs spécifiques selon pathology_id :
+            - fibromyalgie : aucun champ additionnel
+            - endometriose : cyclicite_score (0-3), dyspareunia_score (0-3), pelvic_locations_count (0-10)
+            - sdrc : trigger_event (bool), budapest_sensitif (bool), budapest_vasomoteur (bool),
+                     budapest_sudomoteur (bool), budapest_moteur (bool)
+            - sfc_me : aucun champ additionnel
+            - covid_long_neurologique : covid_confirmed (bool), onset_date (date YYYY-MM-DD)
+          example:
+            WPI: 10
+            fatigue_score: 2
+            sleep_score: 2
+            cognitive_score: 1
+            psych_score: 1
+            evolution_months: 6
+            exclusion_flags: [false, false, false]
+
+    BatchEvaluateRequest:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/EvaluateRequest'
+
+    # ── SCDP — Sortie ─────────────────────────
+
+    ConstraintDetail:
+      type: object
+      required: [id, label, value, satisfied, clinical_reason]
+      properties:
+        id:
+          type: string
+          description: Identifiant de la contrainte (ex. C_chronicite, C_diffusion, C_exclusion)
+          example: C_chronicite
+        label:
+          type: string
+          description: Libellé lisible de la contrainte
+          example: "Chronicité ≥ 3 mois"
+        value:
+          type: integer
+          enum: [0, 1]
+          description: "Valeur binaire Ck : 0 = non satisfaite, 1 = satisfaite"
+        satisfied:
+          type: boolean
+          description: "True si contrainte satisfaite"
+        clinical_reason:
+          type: string
+          description: Motif clinique (raison brevet FR2603250)
+
+    SCDPReport:
+      type: object
+      required:
+        - score_final_normalized
+        - Ic
+        - ic_signature
+        - probability_pct
+        - decision_class
+        - constraints_detail
+        - input_trace
+        - params_version_id
+        - computed_at
+        - pathology_id
+        - pathology_label
+      properties:
+        score_final_normalized:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 100.0
+          description: Score final normalisé sur 100
+          example: 42.5
+        Ic:
+          type: number
+          format: float
+          description: >-
+            Indice de centralisation : Ic = (F + S + C) / (WPI + 1).
+            Ic > 1 → signature de sensibilisation centrale.
+          example: 1.25
+        ic_signature:
+          type: string
+          enum: [sensibilisation_centrale, profil_peripherique]
+          description: Interprétation de Ic
+        probability_pct:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 100.0
+          description: Probabilité diagnostique P(D) en pourcentage
+          example: 67.3
+        decision_class:
+          type: string
+          enum:
+            - INCERTAIN
+            - PROBABLE
+            - HAUTEMENT_PROBABLE
+          description: Classification diagnostique finale
+          example: PROBABLE
+        constraints_detail:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConstraintDetail'
+          description: Détail de toutes les contraintes binaires évaluées
+        input_trace:
+          type: object
+          description: Snapshot des données d'entrée (traçabilité complète)
+          additionalProperties: true
+        params_version_id:
+          type: string
+          description: >-
+            Identifiant de version des paramètres : SHA256[:16]-YYYYMMDDTHHMMSSZ.
+            Preuve de traçabilité opposable (brevet FR2603250).
+          example: "a1b2c3d4e5f67890-20240615T100000Z"
+        pathology_id:
+          type: string
+          example: fibromyalgie
+        pathology_label:
+          type: string
+          example: Fibromyalgie
+        computed_at:
+          type: string
+          format: date-time
+          description: Horodatage ISO8601 de la computation
+
+    EvaluateResponse:
+      allOf:
+        - $ref: '#/components/schemas/SCDPReport'
+        - type: object
+          required: [report_id, pdf_available]
+          properties:
+            report_id:
+              type: string
+              format: uuid
+              description: Identifiant du rapport sauvegardé en base
+            pdf_available:
+              type: boolean
+              description: True si le PDF a été généré et est disponible
+
+    BatchResultItem:
+      type: object
+      required: [index, success]
+      properties:
+        index:
+          type: integer
+          description: Index de l'item dans le batch (0-based)
+        success:
+          type: boolean
+        report_id:
+          type: string
+          format: uuid
+          description: Présent si success=true
+        error:
+          type: string
+          description: Présent si success=false
+        validation_errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          description: Présent si success=false et erreurs de validation
+
+    BatchEvaluateResponse:
+      type: object
+      required: [count, results]
+      properties:
+        count:
+          type: integer
+          description: Nombre d'items dans le batch
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/BatchResultItem'
+
+    # ── Pathologies ───────────────────────────
+
+    PathologyInfo:
+      type: object
+      properties:
+        pathology_id:
+          type: string
+        pathology_label:
+          type: string
+        params_version:
+          type: string
+        reference_standard:
+          type: string
+        ic_required:
+          type: boolean
+        specific_fields:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              type:
+                type: string
+              label:
+                type: string
+              required:
+                type: boolean
+
+    PathologyParamsResponse:
+      type: object
+      properties:
+        pathology_id:
+          type: string
+        version:
+          type: string
+        sha256:
+          type: string
+          description: Hash SHA256 du fichier paramètres
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        params:
+          type: object
+          additionalProperties: true
+          description: Contenu complet du fichier paramètres
+
+    # ── Reports ───────────────────────────────
+
+    ReportSummary:
+      type: object
+      required:
+        - id
+        - pathology_id
+        - decision_class
+        - score_final_normalized
+        - probability_pct
+        - created_at
+        - pdf_available
+      properties:
+        id:
+          type: string
+          format: uuid
+        pathology_id:
+          type: string
+        decision_class:
+          type: string
+          enum: [INCERTAIN, PROBABLE, HAUTEMENT_PROBABLE]
+        score_final_normalized:
+          type: number
+          format: float
+        probability_pct:
+          type: number
+          format: float
+        created_at:
+          type: string
+          format: date-time
+        pdf_available:
+          type: boolean
+
+    PaginatedReports:
+      type: object
+      required: [items, total, page, page_size, total_pages]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReportSummary'
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total_pages:
+          type: integer
+
+    ReportDetail:
+      allOf:
+        - $ref: '#/components/schemas/SCDPReport'
+        - type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            user_id:
+              type: string
+              format: uuid
+            pdf_available:
+              type: boolean
+            created_at:
+              type: string
+              format: date-time
+
+    # ── Admin ─────────────────────────────────
+
+    AuditLogEntry:
+      type: object
+      properties:
+        id:
+          type: integer
+        actor_id:
+          type: string
+          format: uuid
+          nullable: true
+        action:
+          type: string
+          example: scdp.evaluate
+        payload:
+          type: object
+          nullable: true
+          additionalProperties: true
+        ip_address:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    PaginatedAuditLogs:
+      type: object
+      required: [items, total, page, page_size, total_pages]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditLogEntry'
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total_pages:
+          type: integer
+
+    AdminStats:
+      type: object
+      properties:
+        total_users:
+          type: integer
+        total_reports:
+          type: integer
+        by_pathology:
+          type: object
+          additionalProperties:
+            type: integer
+          description: Nombre de rapports par pathologie
+        by_decision:
+          type: object
+          additionalProperties:
+            type: integer
+          description: Nombre de rapports par classe de décision
+
+    # ── Erreurs ───────────────────────────────
+
+    ValidationError:
+      type: object
+      required: [field, msg]
+      properties:
+        field:
+          type: string
+          description: Nom du champ en erreur
+        msg:
+          type: string
+          description: Message d'erreur explicite
+        missing_fields:
+          type: array
+          items:
+            type: string
+          description: Liste des champs manquants (si applicable)
+
+    HTTPError:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          oneOf:
+            - type: string
+            - type: object
+              properties:
+                validation_errors:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/ValidationError'
+
+    HealthResponse:
+      type: object
+      required: [status, version, uptime_seconds, database, timestamp]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        version:
+          type: string
+          example: 1.0.0
+        uptime_seconds:
+          type: number
+          format: float
+        database:
+          type: string
+          enum: [ok, error]
+        pathologies_loaded:
+          type: integer
+          example: 5
+        timestamp:
+          type: string
+          format: date-time
+
+# ─────────────────────────────────────────────
+# Réponses d'erreur réutilisables
+# ─────────────────────────────────────────────
+  responses:
+    Unauthorized:
+      description: Token absent, invalide ou expiré
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/HTTPError'
+          example:
+            detail: "Token invalide ou expiré."
+    Forbidden:
+      description: Accès interdit (rôle insuffisant)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/HTTPError'
+          example:
+            detail: "Accès réservé aux administrateurs."
+    NotFound:
+      description: Ressource introuvable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/HTTPError'
+          example:
+            detail: "Ressource introuvable."
+    UnprocessableEntity:
+      description: Erreur de validation des données d'entrée
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/HTTPError'
+    TooManyRequests:
+      description: Quota de requêtes dépassé
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/HTTPError'
+          example:
+            detail: "Trop de tentatives. Réessayez dans 1 heure."
+
+# ─────────────────────────────────────────────
+# Sécurité globale
+# ─────────────────────────────────────────────
+security:
+  - BearerAuth: []
+
+# ─────────────────────────────────────────────
+# Endpoints
+# ─────────────────────────────────────────────
+paths:
+
+  # ════════════════════════════════════════════
+  # Auth
+  # ════════════════════════════════════════════
+
+  /api/v1/auth/register:
+    post:
+      tags: [Auth]
+      summary: Inscription — crée un compte médecin
+      description: >-
+        Crée un nouveau compte avec le rôle `medecin`.
+        Le mot de passe doit contenir au moins une majuscule et un chiffre.
+        Rate-limited à 10 tentatives / heure par IP.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            example:
+              email: "medecin@exemple.fr"
+              password: "TestPass1"
+      responses:
+        '201':
+          description: Compte créé avec succès
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '409':
+          description: Email déjà utilisé
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+              example:
+                detail: "Cette adresse email est déjà utilisée."
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: Connexion — retourne access + refresh token
+      description: >-
+        Authentifie l'utilisateur et retourne un access token (JWT, courte durée)
+        et un refresh token (JWT, longue durée).
+        Rate-limited à 20 tentatives / 15 min par IP et 10 / 15 min par email.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authentification réussie
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rafraîchissement du token d'accès
+      description: >-
+        Échange un refresh token valide contre de nouveaux access + refresh tokens.
+        Implémente la rotation du refresh token (token révoqué après usage).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: Nouveaux tokens
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Déconnexion — révoque le refresh token
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+      responses:
+        '200':
+          description: Session révoquée
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Session révoquée avec succès."
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/me:
+    get:
+      tags: [Auth]
+      summary: Profil utilisateur courant
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Profil de l'utilisateur authentifié
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ════════════════════════════════════════════
+  # SCDP — Évaluation
+  # ════════════════════════════════════════════
+
+  /api/v1/scdp/evaluate:
+    post:
+      tags: [SCDP]
+      summary: Évaluation SCDP — pipeline complet étapes a→g
+      description: >-
+        Exécute le pipeline algorithmique SCDP complet (brevet FR2603250) :
+        
+        - **Étape a** : Acquisition des données cliniques
+        - **Étape b** : Normalisation des variables
+        - **Étape c** : Score brut pondéré `Score_brut = Σ(wi × Xi) − Σ(vj × Ej)`
+        - **Étape d** : Contraintes binaires `Score_final = Score_brut × C1 × C2 × ... × Cn`
+        - **Étape e** : Indice de centralisation `Ic = (F + S + C) / (WPI + 1)`
+        - **Étape f** : Probabilité logistique `P(D) = 1 / (1 + e^-(a + Σ(bi × Xi) + c × Ic))`
+        - **Étape g** : Rapport structuré + PDF
+        
+        Un seul `Ck = 0` → `Score_final = 0` → décision `INCERTAIN`, quelle que soit la valeur du score brut.
+        
+        Rate-limited à 100 évaluations / heure par utilisateur.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvaluateRequest'
+            examples:
+              fibromyalgie_valide:
+                summary: Fibromyalgie — données valides
+                value:
+                  pathology_id: fibromyalgie
+                  clinical_data:
+                    WPI: 10
+                    fatigue_score: 2
+                    sleep_score: 2
+                    cognitive_score: 1
+                    psych_score: 1
+                    evolution_months: 6
+                    exclusion_flags: [false, false, false]
+              endometriose_valide:
+                summary: Endométriose — avec champs spécifiques
+                value:
+                  pathology_id: endometriose
+                  clinical_data:
+                    WPI: 7
+                    fatigue_score: 2
+                    sleep_score: 2
+                    cognitive_score: 1
+                    psych_score: 1
+                    evolution_months: 8
+                    exclusion_flags: [false, false, false]
+                    cyclicite_score: 2
+                    dyspareunia_score: 2
+                    pelvic_locations_count: 3
+              sdrc_valide:
+                summary: SDRC — avec domaines Budapest
+                value:
+                  pathology_id: sdrc
+                  clinical_data:
+                    WPI: 4
+                    fatigue_score: 1
+                    sleep_score: 1
+                    cognitive_score: 1
+                    psych_score: 0
+                    evolution_months: 3
+                    exclusion_flags: [false, false, false]
+                    trigger_event: true
+                    budapest_sensitif: true
+                    budapest_vasomoteur: true
+                    budapest_sudomoteur: true
+                    budapest_moteur: false
+              covid_long_valide:
+                summary: Covid Long Neurologique
+                value:
+                  pathology_id: covid_long_neurologique
+                  clinical_data:
+                    WPI: 8
+                    fatigue_score: 3
+                    sleep_score: 2
+                    cognitive_score: 2
+                    psych_score: 1
+                    evolution_months: 5
+                    exclusion_flags: [false, false, false]
+                    covid_confirmed: true
+                    onset_date: "2022-03-15"
+      responses:
+        '200':
+          description: Rapport SCDP complet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvaluateResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Pathologie inconnue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '422':
+          description: Erreur de validation — détail champ par champ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+              example:
+                detail:
+                  validation_errors:
+                    - field: WPI
+                      msg: "WPI doit être un entier entre 0 et 19 inclus."
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          description: Erreur interne du moteur SCDP
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+
+  /api/v1/scdp/batch:
+    post:
+      tags: [SCDP]
+      summary: Évaluation en lot (max 100 items)
+      description: >-
+        Évalue un ensemble de cas en une seule requête (max 100 items).
+        Les items invalides sont retournés avec `success: false` sans interrompre le lot.
+        Rate-limited à 10 batches / heure par utilisateur.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchEvaluateRequest'
+      responses:
+        '200':
+          description: Résultats du lot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchEvaluateResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/v1/scdp/pathologies:
+    get:
+      tags: [SCDP]
+      summary: Liste des pathologies disponibles
+      description: >-
+        Retourne les 5 pathologies configurées en v1 avec leurs métadonnées,
+        la version des paramètres et les champs spécifiques attendus.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Liste des pathologies
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pathologies]
+                properties:
+                  pathologies:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PathologyInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/scdp/pathologies/{pathology_id}/schema:
+    get:
+      tags: [SCDP]
+      summary: JSON Schema des champs clinical_data pour une pathologie
+      description: >-
+        Retourne le JSON Schema (Draft-07) des champs clinical_data attendus.
+        Utilisé par le frontend pour la validation dynamique des formulaires.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: pathology_id
+          in: path
+          required: true
+          schema:
+            type: string
+            enum:
+              - fibromyalgie
+              - endometriose
+              - sdrc
+              - sfc_me
+              - covid_long_neurologique
+          example: fibromyalgie
+      responses:
+        '200':
+          description: JSON Schema de la pathologie
+          content:
+            application/json:
+              schema:
+                type: object
+                description: JSON Schema Draft-07
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/scdp/pathologies/{pathology_id}/params:
+    get:
+      tags: [SCDP]
+      summary: Paramètres courants d'une pathologie (lecture seule — admin uniquement)
+      description: >-
+        Retourne le fichier paramètres actif pour une pathologie, incluant le hash SHA256.
+        Accès restreint aux administrateurs.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: pathology_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: fibromyalgie
+      responses:
+        '200':
+          description: Paramètres courants
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PathologyParamsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ════════════════════════════════════════════
+  # Reports
+  # ════════════════════════════════════════════
+
+  /api/v1/reports:
+    get:
+      tags: [Reports]
+      summary: Liste paginée des rapports
+      description: >-
+        Médecin : liste ses propres rapports uniquement.
+        Admin : liste tous les rapports avec filtres optionnels.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: pathology_id
+          in: query
+          schema:
+            type: string
+          description: Filtre par pathologie (optionnel)
+        - name: user_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Filtre par utilisateur (admin uniquement)
+      responses:
+        '200':
+          description: Liste paginée des rapports
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedReports'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/reports/{report_id}:
+    get:
+      tags: [Reports]
+      summary: Détail complet d'un rapport
+      description: >-
+        Retourne le rapport complet incluant toutes les données SCDP.
+        Médecin : accès limité à ses propres rapports.
+        Admin : accès à tous les rapports.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: report_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Rapport complet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/reports/{report_id}/pdf:
+    get:
+      tags: [Reports]
+      summary: Téléchargement du rapport PDF
+      description: >-
+        Retourne le fichier PDF du rapport si disponible.
+        Le PDF est généré par WeasyPrint lors de l'évaluation.
+        Médecin : accès limité à ses propres rapports.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: report_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Fichier PDF
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Rapport introuvable ou PDF non disponible
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+
+  # ════════════════════════════════════════════
+  # Admin
+  # ════════════════════════════════════════════
+
+  /api/v1/admin/audit-logs:
+    get:
+      tags: [Admin]
+      summary: Audit logs (admin uniquement)
+      description: >-
+        Consultation des logs d'audit avec pagination et filtres.
+        Accès restreint aux administrateurs.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+        - name: actor_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: action
+          in: query
+          schema:
+            type: string
+          description: Filtre partiel sur le nom de l'action (LIKE)
+      responses:
+        '200':
+          description: Logs d'audit paginés
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedAuditLogs'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/admin/stats:
+    get:
+      tags: [Admin]
+      summary: Statistiques agrégées (admin uniquement)
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Statistiques de la plateforme
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminStats'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # ════════════════════════════════════════════
+  # Système
+  # ════════════════════════════════════════════
+
+  /health:
+    get:
+      tags: [Système]
+      summary: Healthcheck
+      description: >-
+        Vérifie l'état de l'application et de la connexion à la base de données.
+        Retourne le statut `ok` si tout fonctionne, `degraded` si la DB est inaccessible.
+      security: []
+      responses:
+        '200':
+          description: État de l'application
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              examples:
+                ok:
+                  summary: Système fonctionnel
+                  value:
+                    status: ok
+                    version: "1.0.0"
+                    uptime_seconds: 3600.5
+                    database: ok
+                    pathologies_loaded: 5
+                    timestamp: "2024-06-15T10:00:00Z"
+                degraded:
+                  summary: Base de données inaccessible
+                  value:
+                    status: degraded
+                    version: "1.0.0"
+                    uptime_seconds: 120.3
+                    database: error
+                    pathologies_loaded: 5
+                    timestamp: "2024-06-15T10:02:00Z"
+
+  /metrics:
+    get:
+      tags: [Système]
+      summary: Métriques Prometheus
+      description: >-
+        Endpoint Prometheus exposant les métriques de l'application.
+        Métriques disponibles :
+        - `scdp_evaluations_total` (par pathologie et classe de décision)
+        - `scdp_evaluation_duration_seconds` (histogramme durée pipeline)
+        - `scdp_errors_total` (par type d'erreur)
+        - `scdp_batch_size` (histogramme taille des lots)
+        - `scdp_pdf_generation_duration_seconds` (histogramme durée PDF)
+        - `scdp_active_users_total` (gauge utilisateurs actifs)
+        
+        Accès restreint aux administrateurs.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Métriques au format Prometheus text
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
